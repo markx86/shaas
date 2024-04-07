@@ -163,6 +163,8 @@ main(void) {
       sizeof(ip_str));
   printf("target connected from %s\n", ip_str);
 
+  close(listen_fd);
+
   running = 1;
   skip = 0;
   while (running) {
@@ -181,7 +183,7 @@ main(void) {
   }
 
   close(shell_fd);
-  goto close_listenfd;
+  return 0;
 close_masterfd:
   close(master_fd);
 close_listenfd:
