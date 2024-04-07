@@ -12,13 +12,15 @@
 static int running;
 static char transfer_buf[4096];
 
-static void sigint_handler(int signo) {
+static void
+sigint_handler(int signo) {
   running = 0;
 }
 
-static int transfer_data(int from, int to, int skip) {
+static int
+transfer_data(int from, int to, int skip) {
   int n, r, rc;
-  
+
   rc = ioctl(from, FIONREAD, &n);
   if (rc < 0) {
     perror("ioctl");
@@ -52,9 +54,10 @@ fail:
   return rc;
 }
 
-int main(void) {
+int
+main(void) {
   char success;
-	int rc, skip, listen_fd, shell_fd, master_fd;
+  int rc, skip, listen_fd, shell_fd, master_fd;
   socklen_t target_addr_len;
   struct sockaddr_in listen_addr, master_addr, target_addr;
   struct sigaction sig_alrm, sig_int;
@@ -98,9 +101,9 @@ int main(void) {
   listen_addr.sin_port = htons(CLIENT_PORT);
 
   rc = bind(
-    listen_fd,
-    (struct sockaddr*)&listen_addr,
-    sizeof(struct sockaddr_in));
+      listen_fd,
+      (struct sockaddr*)&listen_addr,
+      sizeof(struct sockaddr_in));
   if (rc < 0) {
     perror("bind");
     goto close_listenfd;
@@ -123,9 +126,9 @@ int main(void) {
   master_addr.sin_port = htons(MASTER_REQUEST_PORT);
 
   rc = connect(
-    master_fd,
-    (struct sockaddr*)&master_addr,
-    sizeof(struct sockaddr_in));
+      master_fd,
+      (struct sockaddr*)&master_addr,
+      sizeof(struct sockaddr_in));
   if (rc < 0) {
     perror("connect");
     goto close_masterfd;
@@ -145,10 +148,8 @@ int main(void) {
 
   target_addr_len = sizeof(struct sockaddr_in);
   alarm(5);
-  rc = shell_fd = accept(
-    listen_fd,
-    (struct sockaddr*)&target_addr,
-    &target_addr_len);
+  rc = shell_fd =
+      accept(listen_fd, (struct sockaddr*)&target_addr, &target_addr_len);
   if (rc < 0) {
     perror("accept");
     goto close_listenfd;
@@ -156,10 +157,10 @@ int main(void) {
   alarm(0);
 
   inet_ntop(
-    target_addr.sin_family,
-    &target_addr.sin_addr,
-    ip_str,
-    sizeof(ip_str));
+      target_addr.sin_family,
+      &target_addr.sin_addr,
+      ip_str,
+      sizeof(ip_str));
   printf("target connected from %s\n", ip_str);
 
   running = 1;

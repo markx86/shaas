@@ -1,11 +1,11 @@
-target_ccflags = \
-	-Wall \
-	-nostdlib \
-	-ffreestanding \
-	-Wl,-T./payload/payload.ld \
-	-Wl,--build-id=none \
-	-I./include \
-	-Oz \
+target_ccflags =				\
+	-Wall						\
+	-nostdlib					\
+	-ffreestanding				\
+	-Wl,-T./payload/payload.ld	\
+	-Wl,--build-id=none			\
+	-I./include					\
+	-Oz							\
 	$(defines)
 
 $(TARGET_ARTIFACT): ./payload/payload.c

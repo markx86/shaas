@@ -9,11 +9,13 @@
 
 static int running;
 
-static void sigint_handler(int signo) {
+static void
+sigint_handler(int signo) {
   running = 0;
 }
 
-static int listen_for_requests(int target_fd) {
+static int
+listen_for_requests(int target_fd) {
   char success;
   int rc, request_fd, sock_fd;
   socklen_t request_addr_len;
@@ -54,16 +56,13 @@ static int listen_for_requests(int target_fd) {
   running = 1;
   while (running) {
     request_addr_len = sizeof(struct sockaddr_in);
-    rc = request_fd = accept(
-      sock_fd,
-      (struct sockaddr*)&request_addr,
-      &request_addr_len);
+    rc = request_fd =
+        accept(sock_fd, (struct sockaddr*)&request_addr, &request_addr_len);
     if (rc < 0) {
       if (!running) {
         rc = 0;
         break;
-      }
-      else
+      } else
         continue;
     }
 
@@ -85,7 +84,7 @@ static int listen_for_requests(int target_fd) {
       success = 0;
     write(request_fd, &success, 1);
 
-end_connection:
+  end_connection:
     close(request_fd);
   }
 
@@ -95,7 +94,8 @@ early_fail:
   return rc;
 }
 
-int main(void) {
+int
+main(void) {
   int rc, master_fd, target_fd;
   socklen_t target_addr_len;
   struct sockaddr_in master_addr, target_addr;
@@ -105,7 +105,7 @@ int main(void) {
   sig_pipe.sa_flags = 0;
   sig_pipe.sa_handler = SIG_IGN;
   sigemptyset(&sig_pipe.sa_mask);
-  
+
   rc = sigaction(SIGPIPE, &sig_pipe, NULL);
   if (rc < 0) {
     perror("sigaction");
@@ -138,11 +138,11 @@ int main(void) {
   master_addr.sin_family = AF_INET;
   master_addr.sin_addr.s_addr = INADDR_ANY;
   master_addr.sin_port = htons(MASTER_TARGET_PORT);
-  
+
   rc = bind(
-    master_fd,
-    (struct sockaddr*)&master_addr,
-    sizeof(struct sockaddr_in));
+      master_fd,
+      (struct sockaddr*)&master_addr,
+      sizeof(struct sockaddr_in));
   if (rc < 0) {
     perror("bind");
     goto closefd_fail;
@@ -155,10 +155,8 @@ int main(void) {
   }
 
   target_addr_len = sizeof(struct sockaddr_in);
-  rc = target_fd = accept(
-    master_fd,
-    (struct sockaddr*)&target_addr,
-    &target_addr_len);
+  rc = target_fd =
+      accept(master_fd, (struct sockaddr*)&target_addr, &target_addr_len);
   if (rc < 0) {
     perror("accept");
     goto closefd_fail;
