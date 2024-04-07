@@ -43,6 +43,6 @@ $(MASTER_ARTIFACT): master.c
 	$(MASTER_CC) $(ccflags) -o $@ $^
 
 $(CLIENT_ARTIFACT): client.c
-	$(CLIENT_CC) $(ccflags) -ggdb -o $@ $^
+	$(CLIENT_CC) $(ccflags) -o $@ $^
 
 include ./payload/payload.mk
