@@ -26,11 +26,18 @@ ccflags = 		\
 	-I./include	\
 	$(defines)
 
-.PHONY: all clean
-all: $(MASTER_ARTIFACT) $(CLIENT_ARTIFACT) $(TARGET_ARTIFACT)
+.PHONY: all clean client master payload
+
+all: client master payload
 
 clean:
 	rm -f $(MASTER_ARTIFACT) $(CLIENT_ARTIFACT) $(TARGET_ARTIFACT)
+
+client: $(CLIENT_ARTIFACT)
+
+master: $(MASTER_ARTIFACT)
+
+payload: $(TARGET_ARTIFACT)
 
 $(MASTER_ARTIFACT): master.c
 	$(MASTER_CC) $(ccflags) -o $@ $^
