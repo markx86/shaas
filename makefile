@@ -18,7 +18,7 @@ CLIENT_PORT		?= 4200
 CLIENT_ARTIFACT	?= shaas.$(CLIENT_ARCH).client
 
 defines =											\
-	-DTARGET_$(TARGET_ARCH)							\
+	-DTARGET_ARCH_$(TARGET_ARCH)					\
 	-DTARGET_SHELL=\"$(TARGET_SHELL)\"				\
 	-DTARGET_ARGV=$(TARGET_ARGV)					\
 	-DTARGET_ENVP=$(TARGET_ENVP)					\

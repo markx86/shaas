@@ -1,6 +1,6 @@
-#include "platform.h"
-#include "syscall.h"
-#include "inet.h"
+#include "sys/platform.h"
+#include "sys/syscall.h"
+#include "sys/inet.h"
 #include <shaas/request.h>
 #include <shaas/config.h>
 

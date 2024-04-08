@@ -1,5 +1,5 @@
-#ifndef __NET_H__
-#define __NET_H__
+#ifndef __INET_H__
+#define __INET_H__
 
 #define SOCK_STREAM 1
 #define SOL_SOCKET 1
