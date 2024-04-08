@@ -1,5 +1,6 @@
 #include <signal.h>
 #include <stdio.h>
+#include <string.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -80,13 +81,26 @@ listen_for_requests(int target_fd) {
 
     write(target_fd, &request, sizeof(union client_request));
     rc = read(target_fd, &success, 1);
-    if (rc < 0)
+    if (rc < 0) {
+      perror("read");
       success = 0;
+    }
     write(request_fd, &success, 1);
 
   end_connection:
     close(request_fd);
   }
+
+  // send close request to payload
+  memcpy(request.bytes, close_magic, sizeof(close_magic));
+  write(target_fd, &request, sizeof(union client_request));
+  rc = read(target_fd, &success, 1);
+  if (rc < 0)
+    perror("read");
+  else if (!success)
+    rc = -1;
+  else
+    rc = 0;
 
 closefd_fail:
   close(sock_fd);
@@ -132,7 +146,7 @@ main(void) {
   rc = setsockopt(master_fd, SOL_SOCKET, SO_REUSEADDR, &rc, sizeof(int));
   if (rc < 0) {
     perror("setsockopt");
-    goto closefd_fail;
+    goto close_masterfd;
   }
 
   master_addr.sin_family = AF_INET;
@@ -145,13 +159,13 @@ main(void) {
       sizeof(struct sockaddr_in));
   if (rc < 0) {
     perror("bind");
-    goto closefd_fail;
+    goto close_masterfd;
   }
 
   rc = listen(master_fd, 1);
   if (rc < 0) {
     perror("listen");
-    goto closefd_fail;
+    goto close_masterfd;
   }
 
   target_addr_len = sizeof(struct sockaddr_in);
@@ -159,16 +173,16 @@ main(void) {
       accept(master_fd, (struct sockaddr*)&target_addr, &target_addr_len);
   if (rc < 0) {
     perror("accept");
-    goto closefd_fail;
+    goto close_masterfd;
   }
 
   inet_ntop(AF_INET, &target_addr.sin_addr, ip_str, sizeof(ip_str));
   printf("target connected from %s\n", ip_str);
 
   rc = listen_for_requests(target_fd);
-
+  
   close(target_fd);
-closefd_fail:
+close_masterfd:
   close(master_fd);
 early_fail:
   return rc;

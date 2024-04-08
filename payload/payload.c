@@ -6,9 +6,6 @@
 
 #define NULL ((void*)0)
 
-const unsigned char close_magic[] =
-    {0xde, 0xad, 0xbe, 0xef, 0xba, 0xbe, 0x00, 0x00};
-
 static const char* const argv[] = {TARGET_SHELL, TARGET_ARGV, NULL};
 static const char* const envp[] = {TARGET_ENVP, NULL};
 
