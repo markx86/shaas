@@ -1,6 +1,18 @@
 #ifndef __CONFIG_H__
 #define __CONFIG_H__
 
+#ifndef TARGET_SHELL
+#define TARGET_SHELL "/bin/sh"
+#endif
+
+#ifndef TARGET_ARGV
+#define TARGET_ARGV "-i"
+#endif
+
+#ifndef TARGET_ENVP
+#define TARGET_ENVP "TERM=linux"
+#endif
+
 #ifndef MASTER_IP
 #define MASTER_IP "127.0.0.1"
 #endif

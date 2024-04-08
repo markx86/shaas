@@ -27,6 +27,9 @@ $ make [ARGS=VALUE]...
 Build arguments for the `payload` executable
 - `TARGET_CC` (defaults to `gcc`): the compiler to be used during the build process
 - `TARGET_ARCH` (defaults to `x86_64`): the target architecture
+- `TARGET_SHELL` (defaults to `/bin/sh`): the shell to be executed
+- `TARGET_ARGV` (defaults to `-i`): the arguments to use when launching the shell
+- `TARGET_ENVP` (defaults to `TERM=linux`): the initial environment variables of the shell
 - `TARGET_ARTIFACT` (defaults to `shaas.$TARGET_ARCH.payload`): the name of the resulting executable
 
 Build arguments for the `master` server
@@ -45,6 +48,6 @@ Build arguments for the `client` executable
 
 ### TODO
 - moar testing
-- support shells other than GNU's /bin/sh
+- ~~support shells other than GNU's /bin/sh~~
 - support more architectures
 - support for hostnames as master server address

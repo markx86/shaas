@@ -1,5 +1,8 @@
 TARGET_CC 		?= gcc
 TARGET_ARCH		?= x86_64
+TARGET_SHELL	?= /bin/sh
+TARGET_ARGV		?= \"-i\"
+TARGET_ENVP		?= \"TERM=linux\"
 TARGET_ARTIFACT	?= shaas.$(TARGET_ARCH).payload
 
 MASTER_CC			?= gcc
@@ -16,6 +19,9 @@ CLIENT_ARTIFACT	?= shaas.$(CLIENT_ARCH).client
 
 defines =											\
 	-DTARGET_$(TARGET_ARCH)							\
+	-DTARGET_SHELL=\"$(TARGET_SHELL)\"				\
+	-DTARGET_ARGV=$(TARGET_ARGV)					\
+	-DTARGET_ENVP=$(TARGET_ENVP)					\
 	-DMASTER_IP=\"$(MASTER_IP)\"					\
 	-DMASTER_TARGET_PORT=$(MASTER_TARGET_PORT)		\
 	-DMASTER_REQUEST_PORT=$(MASTER_REQUEST_PORT)	\
