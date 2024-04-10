@@ -13,7 +13,7 @@ The master server will forward this request to the payload along with the client
 will try to connect to client.  
 On success, the payload will spawn a reverse shell with which the client can interact.  
 
-All this mess just to evade firewalls 👍
+All this mess just to bypass firewalls 👍
 
 > [!NOTE]
 > **shaas** is a weekend project (more like a one-day project, but oh well :^) shit happens) so don't expect it to be pretty.
