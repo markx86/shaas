@@ -29,4 +29,8 @@
 #define CLIENT_PORT 4200
 #endif
 
+#ifndef MAX_CONNS
+#define MAX_CONNS 128
+#endif
+
 #endif
