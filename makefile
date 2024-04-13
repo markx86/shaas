@@ -29,8 +29,12 @@ defines =											\
 
 ccflags = 		\
 	-Wall 		\
+	-fsanitize=address \
 	-I./include	\
+	-g 		 	\
 	$(defines)
+ldflags = 		\
+	-lpthread
 
 .PHONY: all clean client master payload
 
@@ -46,7 +50,7 @@ master: $(MASTER_ARTIFACT)
 payload: $(TARGET_ARTIFACT)
 
 $(MASTER_ARTIFACT): master.c
-	$(MASTER_CC) $(ccflags) -o $@ $^
+	$(MASTER_CC) $(ccflags) -o $@ $^ $(ldflags)
 
 $(CLIENT_ARTIFACT): client.c
 	$(CLIENT_CC) $(ccflags) -o $@ $^

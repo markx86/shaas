@@ -1,3 +1,4 @@
+#include "include/shaas/config.h"
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>
@@ -7,16 +8,90 @@
 #include <unistd.h>
 #include <shaas/request.h>
 #include <shaas/config.h>
+#include <pthread.h>
+#include <stdbool.h>
 
+// LOCAL TYPE DEFINITIONS
+typedef struct {
+  struct sockaddr_in saddr;
+  int fd;
+  int request_fd;
+  int listen_fd;
+  pthread_t thread;
+  pthread_mutex_t mutex;
+} arg_pack_t;
+
+// PROTOS
+static int
+listen_for_requests(int target_fd, arg_pack_t *arg);
+
+// GLOBAL VARS
+static size_t pool_index = 0;
+static arg_pack_t args[MAX_CONNS] = {0};
 static int running;
 
 static void
 sigint_handler(int signo) {
   running = 0;
+
+  size_t i;
+  for (i=0; i<MAX_CONNS; ++i) {
+    if (args[i].fd != 0)
+      close(args[i].fd);
+    if (args[i].request_fd != 0)
+      close(args[i].request_fd);
+    if (args[i].listen_fd != 0)
+      close(args[i].listen_fd);
+    memset(&args[i], 0, sizeof(arg_pack_t));
+  }
+}
+
+static void
+sigint_thread_handler(int signo){
+  pthread_exit(NULL);
+}
+
+static void
+*target_conn_handler(void *_) {
+
+  // Set sigint handler which brutally exits the thread on sigint
+  // fds are closed by the main thread sigint handler
+  struct sigaction sa;
+  sa.sa_handler = &sigint_thread_handler;
+  sigemptyset(&sa.sa_mask);
+  sa.sa_flags = 0;
+
+  if (sigaction(SIGINT, &sa, NULL) == -1) {
+      perror("sigaction");
+      return (void*)-1;
+  }
+
+  // UNPACK
+  arg_pack_t *arg = (arg_pack_t*)_;
+  pthread_mutex_lock(&arg->mutex);
+  struct sockaddr_in target_addr = arg->saddr;
+  int target_fd = arg->fd;
+  pthread_mutex_unlock(&arg->mutex);
+
+  // Start thread to handle the connection
+  char ip_str[INET_ADDRSTRLEN] = {0};
+  inet_ntop(AF_INET, &target_addr.sin_addr, ip_str, sizeof(ip_str));
+  printf("target connected from %s\n", ip_str);
+  // TODO: error handling?
+  int rc = listen_for_requests(target_fd, arg);
+  close(target_fd);
+
+  // DONE: clear the global variable
+  pthread_mutex_lock(&arg->mutex);
+  memset(&arg->saddr, 0, sizeof(struct sockaddr_in));
+  arg->fd = 0;
+  pthread_mutex_unlock(&arg->mutex);
+
+  return NULL;
 }
 
 static int
-listen_for_requests(int target_fd) {
+listen_for_requests(int target_fd, arg_pack_t *arg) {
   char success;
   int rc, request_fd, sock_fd;
   socklen_t request_addr_len;
@@ -30,6 +105,9 @@ listen_for_requests(int target_fd) {
     perror("socket");
     goto early_fail;
   }
+
+  // Record this socket into the table
+  arg->listen_fd = sock_fd;
 
   rc = 1;
   rc = setsockopt(sock_fd, SOL_SOCKET, SO_REUSEADDR, &rc, sizeof(int));
@@ -67,6 +145,9 @@ listen_for_requests(int target_fd) {
         continue;
     }
 
+    // Record the fd into the table, so we can clear it when SIGINT
+    arg->request_fd = request_fd;
+
     inet_ntop(AF_INET, &request_addr.sin_addr, ip_str, sizeof(ip_str));
     printf("incoming request from %s\n", ip_str);
 
@@ -89,6 +170,7 @@ listen_for_requests(int target_fd) {
 
   end_connection:
     close(request_fd);
+    arg->request_fd = 0;
   }
 
   // send close request to payload
@@ -104,6 +186,7 @@ listen_for_requests(int target_fd) {
 
 closefd_fail:
   close(sock_fd);
+  arg->listen_fd = 0;
 early_fail:
   return rc;
 }
@@ -114,7 +197,8 @@ main(void) {
   socklen_t target_addr_len;
   struct sockaddr_in master_addr, target_addr;
   struct sigaction sig_int, sig_pipe;
-  char ip_str[INET_ADDRSTRLEN];
+  size_t i, tries;
+  //char ip_str[INET_ADDRSTRLEN];
 
   sig_pipe.sa_flags = 0;
   sig_pipe.sa_handler = SIG_IGN;
@@ -162,26 +246,58 @@ main(void) {
     goto close_masterfd;
   }
 
-  rc = listen(master_fd, 1);
+  fprintf(stdout, "[!] Bound on port %d. Listening for targets\n", MASTER_TARGET_PORT);
+
+  // Initialize locks
+  for (i=0; i<MAX_CONNS; ++i)
+    pthread_mutex_init(&args[i].mutex, NULL);
+
+  rc = listen(master_fd, MAX_CONNS);
   if (rc < 0) {
     perror("listen");
     goto close_masterfd;
   }
 
   target_addr_len = sizeof(struct sockaddr_in);
-  rc = target_fd =
-      accept(master_fd, (struct sockaddr*)&target_addr, &target_addr_len);
-  if (rc < 0) {
-    perror("accept");
-    goto close_masterfd;
-  }
-
-  inet_ntop(AF_INET, &target_addr.sin_addr, ip_str, sizeof(ip_str));
-  printf("target connected from %s\n", ip_str);
-
-  rc = listen_for_requests(target_fd);
   
-  close(target_fd);
+  // WE LOOP UNTIL SIGINT
+  while (true) {
+    rc = target_fd =
+        accept(master_fd, (struct sockaddr*)&target_addr, &target_addr_len);
+    if (rc < 0) {
+      perror("accept");
+      // Call sigint on all threads
+      kill(0, SIGINT);
+      goto close_masterfd;
+    }
+
+    // We try to acquire the lock for a number of slot, before renouncing
+    for (tries = 0; tries < MAX_CONNS; ++tries) {
+      if (pthread_mutex_trylock(&args[pool_index].mutex) == 0) {
+        if (args[pool_index].fd == 0)
+          break;
+        pthread_mutex_unlock(&args[pool_index].mutex);
+      }
+
+      pool_index = (pool_index+1) % MAX_CONNS;
+    }
+
+    // No slots, discard connection (sorry pal)
+    if (tries == MAX_CONNS)
+      continue;
+
+    // We have handled sync, now let's launch the thread
+    args[pool_index].fd = target_fd;
+    args[pool_index].saddr = target_addr;
+    pthread_create(&args[pool_index].thread, NULL, &target_conn_handler, (void*) &args[pool_index]);
+    pthread_mutex_unlock(&args[pool_index].mutex);
+    
+    // We can no longer use this slot
+    pool_index = (pool_index+1) % MAX_CONNS;
+
+    fprintf(stdout, "[*] Accepted target connection");
+  }
+  
 close_masterfd:
   close(master_fd);
 early_fail:
