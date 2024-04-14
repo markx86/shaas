@@ -29,7 +29,6 @@ defines =											\
 
 ccflags = 		\
 	-Wall 		\
-	-fsanitize=address \
 	-I./include	\
 	-g 		 	\
 	$(defines)
