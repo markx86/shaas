@@ -25,12 +25,12 @@
 #define MASTER_REQUEST_PORT 6969
 #endif
 
-#ifndef CLIENT_PORT
-#define CLIENT_PORT 4200
+#ifndef MASTER_TARGETS_MAX
+#define MASTER_TARGETS_MAX 128
 #endif
 
-#ifndef MAX_CONNS
-#define MAX_CONNS 128
+#ifndef CLIENT_PORT
+#define CLIENT_PORT 4200
 #endif
 
 #ifndef CONN_TIMEOUT

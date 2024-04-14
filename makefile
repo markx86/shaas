@@ -30,7 +30,6 @@ defines =											\
 ccflags = 		\
 	-Wall 		\
 	-I./include	\
-	-g 		 	\
 	$(defines)
 ldflags = 		\
 	-lpthread
