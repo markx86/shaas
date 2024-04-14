@@ -33,4 +33,8 @@
 #define MAX_CONNS 128
 #endif
 
+#ifndef CONN_TIMEOUT
+#define CONN_TIMEOUT 30
+#endif
+
 #endif

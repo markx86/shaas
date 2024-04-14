@@ -21,6 +21,12 @@ typedef struct {
   pthread_cond_t cond;
   pthread_mutex_t mutex;
 } arg_pack_t;
+
+typedef struct
+{
+  pthread_t tid;
+  int seconds;
+} pthread_alarm_t;
 /* ****************************************** */
 
 // PROTOS
@@ -38,6 +44,11 @@ static int listen_fd = 0;
 /* ****************************************** */
 
 // SIGNAL HANDLERS
+static void sigalrm_handler(int signo)
+{
+  return;
+}
+
 static void
 sigint_handler(int signo) {
   running = 0;
@@ -77,6 +88,29 @@ sigint_listen_thread_handler(int signo) {
 
 /* ****************************************** */
 
+static void
+*thread_alarm_routine(void *_)
+{
+  pthread_t arg = (pthread_t)_;
+  sleep(CONN_TIMEOUT);
+  pthread_kill(arg, SIGALRM);
+  return NULL;
+}
+
+static pthread_t
+thread_alarm(pthread_t tid)
+{
+  pthread_t alarm;
+  pthread_create(&alarm, NULL, &thread_alarm_routine, (void*) tid);
+  return alarm;
+}
+
+static void
+kill_thread_alarm(pthread_t alarm)
+{
+  pthread_kill(alarm, SIGTERM);
+}
+
 static int
 send_close_magic(int target_fd, char *success) {
   union client_request request;
@@ -95,6 +129,7 @@ static void
   int request_fd, rc, match;
   socklen_t request_addr_len;
   size_t i;
+  pthread_t alarm;
 
   // Install signal handler
   sa.sa_handler = &sigint_listen_thread_handler;
@@ -102,6 +137,12 @@ static void
   sa.sa_flags = 0;
 
   if (sigaction(SIGTERM, &sa, NULL) == -1) {
+      perror("listener sigaction");
+      return (void*)-1;
+  }
+
+  sa.sa_handler = &sigalrm_handler;
+  if (sigaction(SIGALRM, &sa, NULL) == -1) {
       perror("listener sigaction");
       return (void*)-1;
   }
@@ -146,11 +187,14 @@ static void
       goto closefd_fail;
     }
     // Let's try and read 4 bytes from request_fd to get the target
+    alarm = thread_alarm(listen_thread);
     rc = read(request_fd, &target_addr, sizeof(in_addr_t));
     if (rc < 0) {
       perror("listener read target address");
+      close(request_fd);
       continue;
     }
+    kill_thread_alarm(alarm);
 
     // Let's search the args array for this address
     match = 0;
@@ -197,6 +241,12 @@ static void
       return (void*)-1;
   }
 
+  sa.sa_handler = &sigalrm_handler;
+  if (sigaction(SIGALRM, &sa, NULL) == -1) {
+      perror("sigaction");
+      return (void*)-1;
+  }
+
   // UNPACK
   arg_pack_t *arg = (arg_pack_t*)_;
   pthread_mutex_lock(&arg->mutex);
@@ -224,15 +274,16 @@ static void
 
 static int
 wait_and_handle_requests(int target_fd, arg_pack_t *arg) {
-  char success;
+  char success = 1;
   int rc, request_fd;
   pthread_t tid = arg->thread;
   in_port_t request_port;
   struct sockaddr_in request_addr;
   union client_request request;
+  pthread_t alarm;
   char ip_str[INET_ADDRSTRLEN];
 
-  while (true) {
+  while (success) {
     // Wait for listener thread to hand us a client conn
     pthread_mutex_lock(&arg->mutex);
     pthread_cond_wait(&arg->cond, &arg->mutex);
@@ -251,16 +302,19 @@ wait_and_handle_requests(int target_fd, arg_pack_t *arg) {
     inet_ntop(AF_INET, &request_addr.sin_addr, ip_str, sizeof(ip_str));
     fprintf(stdout, "[%lu] Incoming request from %s\n", tid, ip_str);
 
+    alarm = thread_alarm(tid);
     rc = read(request_fd, &request_port, sizeof(in_port_t));
     if (rc < 0) {
       fprintf(stderr, "[%lu] Read fail!\n", tid);
       perror("read");
       goto end_connection;
     }
+    kill_thread_alarm(alarm);
 
     request.client_ip = request_addr.sin_addr.s_addr;
     request.client_port = request_port;
 
+    alarm = thread_alarm(tid);
     write(target_fd, &request, sizeof(union client_request));
     rc = read(target_fd, &success, 1);
     if (rc < 0) {
@@ -269,6 +323,7 @@ wait_and_handle_requests(int target_fd, arg_pack_t *arg) {
       success = 0;
     }
     write(request_fd, &success, 1);
+    kill_thread_alarm(alarm);
 
   end_connection:
     close(request_fd);
@@ -283,10 +338,11 @@ main(void) {
   int rc, master_fd, target_fd;
   socklen_t target_addr_len;
   struct sockaddr_in master_addr, target_addr;
-  struct sigaction sig_int, sig_pipe;
+  struct sigaction sig_int; //sig_pipe;
   size_t i, tries, pool_index = 0;
   //char ip_str[INET_ADDRSTRLEN];
 
+  /*
   sig_pipe.sa_flags = 0;
   sig_pipe.sa_handler = SIG_IGN;
   sigemptyset(&sig_pipe.sa_mask);
@@ -296,7 +352,7 @@ main(void) {
     perror("sigaction");
     goto early_fail;
   }
-
+  */
   sig_int.sa_flags = 0;
   sig_int.sa_handler = &sigint_handler;
   sigemptyset(&sig_int.sa_mask);
