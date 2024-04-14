@@ -79,15 +79,12 @@ sigint_listen_thread_handler(int signo) {
 
 static int
 send_close_magic(int target_fd, char *success) {
-  char discard;
   union client_request request;
-
-  if (success == NULL)
-    success = &discard;
-
   memcpy(request.bytes, close_magic, sizeof(close_magic));
   write(target_fd, &request, sizeof(union client_request));
-  return read(target_fd, success, 1);
+  if (success != NULL)  
+    return read(target_fd, success, 1);
+  else return 0;
 }
 
 static void
