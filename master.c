@@ -21,12 +21,6 @@ typedef struct {
   pthread_cond_t cond;
   pthread_mutex_t mutex;
 } arg_pack_t;
-
-typedef struct
-{
-  pthread_t tid;
-  int seconds;
-} pthread_alarm_t;
 /* ****************************************** */
 
 // PROTOS
