@@ -16,52 +16,186 @@ typedef struct {
   struct sockaddr_in saddr;
   int fd;
   int request_fd;
-  int listen_fd;
+  struct sockaddr_in request_addr;
   pthread_t thread;
+  pthread_cond_t cond;
   pthread_mutex_t mutex;
 } arg_pack_t;
+/* ****************************************** */
 
 // PROTOS
 static int
-listen_for_requests(int target_fd, arg_pack_t *arg);
+wait_and_handle_requests(int target_fd, arg_pack_t *arg);
+static int
+send_close_magic(int target_fd, char *success);
+/* ****************************************** */
 
 // GLOBAL VARS
-static size_t pool_index = 0;
 static arg_pack_t args[MAX_CONNS] = {0};
 static int running;
+static pthread_t listen_thread;
+static int listen_fd = 0;
+/* ****************************************** */
 
+// SIGNAL HANDLERS
 static void
 sigint_handler(int signo) {
   running = 0;
+  pthread_kill(listen_thread, SIGTERM);
 
   size_t i;
   for (i=0; i<MAX_CONNS; ++i) {
+    if (args[i].thread != 0)
+    {
+      pthread_kill(args[i].thread, SIGTERM);
+    }
     if (args[i].fd != 0)
+    {
+      (void) send_close_magic(args[i].fd, NULL);
       close(args[i].fd);
+    }
     if (args[i].request_fd != 0)
       close(args[i].request_fd);
-    if (args[i].listen_fd != 0)
-      close(args[i].listen_fd);
     memset(&args[i], 0, sizeof(arg_pack_t));
   }
 }
 
 static void
-sigint_thread_handler(int signo){
+sigint_target_threads_handler(int signo) {
   pthread_exit(NULL);
+}
+
+static void
+sigint_listen_thread_handler(int signo) {
+  if (listen_fd != 0)
+  {
+      close(listen_fd);
+      listen_fd = 0;
+  }
+  pthread_exit(NULL);
+}
+
+/* ****************************************** */
+
+static int
+send_close_magic(int target_fd, char *success) {
+  char discard;
+  union client_request request;
+
+  if (success == NULL)
+    success = &discard;
+
+  memcpy(request.bytes, close_magic, sizeof(close_magic));
+  write(target_fd, &request, sizeof(union client_request));
+  return read(target_fd, success, 1);
+}
+
+static void
+*listen_conn_handler(void *_) {
+  struct sigaction sa;
+  struct sockaddr_in sock_addr, request_addr;
+  in_addr_t target_addr;
+  int request_fd, rc, match;
+  socklen_t request_addr_len;
+  size_t i;
+
+  // Install signal handler
+  sa.sa_handler = &sigint_listen_thread_handler;
+  sigemptyset(&sa.sa_mask);
+  sa.sa_flags = 0;
+
+  if (sigaction(SIGTERM, &sa, NULL) == -1) {
+      perror("listener sigaction");
+      return (void*)-1;
+  }
+
+  listen_fd = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
+  if (listen_fd < 0) {
+    perror("listener socket");
+    goto early_fail;
+  }
+
+  rc = 1;
+  rc = setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &rc, sizeof(int));
+  if (rc < 0) {
+    perror("listener setsockopt");
+    goto closefd_fail;
+  }
+
+  sock_addr.sin_family = AF_INET;
+  sock_addr.sin_addr.s_addr = INADDR_ANY;
+  sock_addr.sin_port = htons(MASTER_REQUEST_PORT);
+
+  rc = bind(listen_fd, (struct sockaddr*)&sock_addr, sizeof(struct sockaddr_in));
+  if (rc < 0) {
+    perror("listener bind");
+    goto closefd_fail;
+  }
+
+  rc = listen(listen_fd, MAX_CONNS);
+  if (rc < 0) {
+    perror("listener listen");
+    goto closefd_fail;
+  }
+
+  fprintf(stderr, "[LISTENER] Bound on port %d. Listening for clients\n", MASTER_REQUEST_PORT);
+
+  while (true) {
+    request_addr_len = sizeof(struct sockaddr_in);
+    rc = request_fd =
+        accept(listen_fd, (struct sockaddr*)&request_addr, &request_addr_len);
+    if (rc < 0) {
+      perror("listener accept");
+      goto closefd_fail;
+    }
+    // Let's try and read 4 bytes from request_fd to get the target
+    rc = read(request_fd, &target_addr, sizeof(in_addr_t));
+    if (rc < 0) {
+      perror("listener read target address");
+      continue;
+    }
+
+    // Let's search the args array for this address
+    match = 0;
+    for (i=0; i<MAX_CONNS; ++i) {
+      pthread_mutex_lock(&args[i].mutex);
+      if (args[i].saddr.sin_addr.s_addr == target_addr)
+      {
+        args[i].request_fd = request_fd;
+        args[i].request_addr = request_addr;
+        pthread_mutex_unlock(&args[i].mutex);
+        pthread_cond_signal(&args[i].cond);
+        match = 1;
+        break;
+      }
+      pthread_mutex_unlock(&args[i].mutex);
+    }
+
+    if (!match)
+    {
+      fputs("[LISTENER] Client asked for an IP I don't have", stderr);
+      close(request_fd);
+    }
+  }
+  return NULL;
+
+closefd_fail:
+  close(listen_fd);
+  listen_fd = 0;
+early_fail:
+  return (void*)-1;
 }
 
 static void
 *target_conn_handler(void *_) {
 
-  // Set sigint handler which brutally exits the thread on sigint
-  // fds are closed by the main thread sigint handler
+  // Install signal handler
   struct sigaction sa;
-  sa.sa_handler = &sigint_thread_handler;
+  sa.sa_handler = &sigint_target_threads_handler;
   sigemptyset(&sa.sa_mask);
   sa.sa_flags = 0;
 
-  if (sigaction(SIGINT, &sa, NULL) == -1) {
+  if (sigaction(SIGTERM, &sa, NULL) == -1) {
       perror("sigaction");
       return (void*)-1;
   }
@@ -76,83 +210,53 @@ static void
   // Start thread to handle the connection
   char ip_str[INET_ADDRSTRLEN] = {0};
   inet_ntop(AF_INET, &target_addr.sin_addr, ip_str, sizeof(ip_str));
-  printf("target connected from %s\n", ip_str);
+  fprintf(stderr, "[*] target connected from %s\n", ip_str);
   // TODO: error handling?
-  int rc = listen_for_requests(target_fd, arg);
+  int rc = wait_and_handle_requests(target_fd, arg);
   close(target_fd);
 
   // DONE: clear the global variable
   pthread_mutex_lock(&arg->mutex);
   memset(&arg->saddr, 0, sizeof(struct sockaddr_in));
   arg->fd = 0;
+  arg->thread = 0;
   pthread_mutex_unlock(&arg->mutex);
 
   return NULL;
 }
 
 static int
-listen_for_requests(int target_fd, arg_pack_t *arg) {
+wait_and_handle_requests(int target_fd, arg_pack_t *arg) {
   char success;
-  int rc, request_fd, sock_fd;
-  socklen_t request_addr_len;
+  int rc, request_fd;
+  pthread_t tid = arg->thread;
   in_port_t request_port;
-  struct sockaddr_in sock_addr, request_addr;
+  struct sockaddr_in request_addr;
   union client_request request;
   char ip_str[INET_ADDRSTRLEN];
 
-  rc = sock_fd = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
-  if (rc < 0) {
-    perror("socket");
-    goto early_fail;
-  }
-
-  // Record this socket into the table
-  arg->listen_fd = sock_fd;
-
-  rc = 1;
-  rc = setsockopt(sock_fd, SOL_SOCKET, SO_REUSEADDR, &rc, sizeof(int));
-  if (rc < 0) {
-    perror("setsockopt");
-    goto closefd_fail;
-  }
-
-  sock_addr.sin_family = AF_INET;
-  sock_addr.sin_addr.s_addr = INADDR_ANY;
-  sock_addr.sin_port = htons(MASTER_REQUEST_PORT);
-
-  rc = bind(sock_fd, (struct sockaddr*)&sock_addr, sizeof(struct sockaddr_in));
-  if (rc < 0) {
-    perror("bind");
-    goto closefd_fail;
-  }
-
-  rc = listen(sock_fd, 8);
-  if (rc < 0) {
-    perror("listen");
-    goto closefd_fail;
-  }
-
-  running = 1;
-  while (running) {
-    request_addr_len = sizeof(struct sockaddr_in);
-    rc = request_fd =
-        accept(sock_fd, (struct sockaddr*)&request_addr, &request_addr_len);
-    if (rc < 0) {
-      if (!running) {
-        rc = 0;
-        break;
-      } else
-        continue;
+  while (true) {
+    // Wait for listener thread to hand us a client conn
+    pthread_mutex_lock(&arg->mutex);
+    pthread_cond_wait(&arg->cond, &arg->mutex);
+    request_fd = arg->request_fd;
+    request_addr = arg->request_addr;
+    arg->request_fd = 0;
+    memset(&arg->request_addr, 0, sizeof(struct sockaddr_in));
+    pthread_mutex_unlock(&arg->mutex);
+    
+    if (request_fd <= 0)
+    {
+      fprintf(stderr, "[%lu] Received invalid request_fd\n", tid);
+      continue;
     }
 
-    // Record the fd into the table, so we can clear it when SIGINT
-    arg->request_fd = request_fd;
-
     inet_ntop(AF_INET, &request_addr.sin_addr, ip_str, sizeof(ip_str));
-    printf("incoming request from %s\n", ip_str);
+    fprintf(stdout, "[%lu] Incoming request from %s\n", tid, ip_str);
 
     rc = read(request_fd, &request_port, sizeof(in_port_t));
     if (rc < 0) {
+      fprintf(stderr, "[%lu] Read fail!\n", tid);
       perror("read");
       goto end_connection;
     }
@@ -163,6 +267,7 @@ listen_for_requests(int target_fd, arg_pack_t *arg) {
     write(target_fd, &request, sizeof(union client_request));
     rc = read(target_fd, &success, 1);
     if (rc < 0) {
+      fprintf(stderr, "[%lu] Read fail!\n", tid);
       perror("read");
       success = 0;
     }
@@ -173,21 +278,6 @@ listen_for_requests(int target_fd, arg_pack_t *arg) {
     arg->request_fd = 0;
   }
 
-  // send close request to payload
-  memcpy(request.bytes, close_magic, sizeof(close_magic));
-  write(target_fd, &request, sizeof(union client_request));
-  rc = read(target_fd, &success, 1);
-  if (rc < 0)
-    perror("read");
-  else if (!success)
-    rc = -1;
-  else
-    rc = 0;
-
-closefd_fail:
-  close(sock_fd);
-  arg->listen_fd = 0;
-early_fail:
   return rc;
 }
 
@@ -197,7 +287,7 @@ main(void) {
   socklen_t target_addr_len;
   struct sockaddr_in master_addr, target_addr;
   struct sigaction sig_int, sig_pipe;
-  size_t i, tries;
+  size_t i, tries, pool_index = 0;
   //char ip_str[INET_ADDRSTRLEN];
 
   sig_pipe.sa_flags = 0;
@@ -248,26 +338,31 @@ main(void) {
 
   fprintf(stdout, "[!] Bound on port %d. Listening for targets\n", MASTER_TARGET_PORT);
 
-  // Initialize locks
+  // Initialize locks and conds
   for (i=0; i<MAX_CONNS; ++i)
+  {
     pthread_mutex_init(&args[i].mutex, NULL);
-
+    pthread_cond_init(&args[i].cond, NULL);
+  }
   rc = listen(master_fd, MAX_CONNS);
   if (rc < 0) {
     perror("listen");
     goto close_masterfd;
   }
-
-  target_addr_len = sizeof(struct sockaddr_in);
   
+  // We launch the listener thread
+  pthread_create(&listen_thread, NULL, &listen_conn_handler, NULL);
+
   // WE LOOP UNTIL SIGINT
   while (true) {
+    target_addr_len = sizeof(struct sockaddr_in);
     rc = target_fd =
         accept(master_fd, (struct sockaddr*)&target_addr, &target_addr_len);
     if (rc < 0) {
       perror("accept");
       // Call sigint on all threads
-      kill(0, SIGINT);
+      if (running)
+        kill(0, SIGINT);
       goto close_masterfd;
     }
 
@@ -295,7 +390,7 @@ main(void) {
     // We can no longer use this slot
     pool_index = (pool_index+1) % MAX_CONNS;
 
-    fprintf(stdout, "[*] Accepted target connection");
+    //fprintf(stdout, "[*] Accepted target connection");
   }
   
 close_masterfd:

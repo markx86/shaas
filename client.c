@@ -55,13 +55,27 @@ fail:
 }
 
 int
-main(void) {
+main(int argc, char **argv) {
   char success;
   int rc, skip, listen_fd, shell_fd, master_fd;
   socklen_t target_addr_len;
   struct sockaddr_in listen_addr, master_addr, target_addr;
   struct sigaction sig_alrm, sig_int;
   char ip_str[INET_ADDRSTRLEN];
+  struct in_addr target_ip;
+
+  if (argc < 2)
+  {
+    fputs("Please specify a target IP: ./shaas [TARGET_IP]\n", stderr);
+    return -1;
+  }
+
+  rc = inet_pton(AF_INET, argv[1], &target_ip);
+  if (rc != 1)
+  {
+    fputs("Invalid target IP\n", stderr);
+    return -1;
+  }
 
   sig_alrm.sa_flags = 0;
   sig_alrm.sa_handler = SIG_IGN;
@@ -133,7 +147,8 @@ main(void) {
     perror("connect");
     goto close_masterfd;
   }
-
+  
+  write(master_fd, &target_ip.s_addr, sizeof(in_addr_t));
   write(master_fd, &listen_addr.sin_port, sizeof(in_port_t));
   rc = read(master_fd, &success, 1);
   if (rc < 0) {
