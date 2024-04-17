@@ -5,7 +5,7 @@ target_ccflags =				\
 	-Wl,-T./payload/payload.ld	\
 	-Wl,--build-id=none			\
 	-I./include					\
-	-Oz							\
+	-Os							\
 	$(defines)
 
 $(TARGET_ARTIFACT): ./payload/payload.c

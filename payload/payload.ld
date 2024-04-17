@@ -15,6 +15,7 @@ SECTIONS
 	{
 		*(.text*)
 		*(.rodata*)
+		*(.data.rel.ro.*)
 	} :everything
 
 	/DISCARD/ : {
