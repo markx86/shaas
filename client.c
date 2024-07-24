@@ -1,5 +1,6 @@
 #include <signal.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <sys/ioctl.h>
 #include <sys/sendfile.h>
 #include <sys/socket.h>
@@ -56,23 +57,28 @@ fail:
 
 int
 main(int argc, char **argv) {
-  char success;
+  char success, *invalid_ptr, *master_ip;
   int rc, skip, listen_fd, shell_fd, master_fd;
+  size_t target_id;
   socklen_t target_addr_len;
   struct sockaddr_in listen_addr, master_addr, target_addr;
   struct sigaction sig_alrm, sig_int;
   char ip_str[INET_ADDRSTRLEN];
   struct in_addr target_ip;
 
-  if (argc < 2)
-  {
-    fputs("Please specify a target IP: ./shaas [TARGET_IP]\n", stderr);
+  if (argc < 3) {
+    fputs("Please specify a target IP: ./shaas TARGET_ID CLIENT_IP [MASTER_IP]\n", stderr);
     return -1;
   }
 
-  rc = inet_pton(AF_INET, argv[1], &target_ip);
-  if (rc != 1)
-  {
+  target_id = strtoul(argv[1], &invalid_ptr, 10);
+  if (invalid_ptr == NULL || invalid_ptr[0] != '\0') {
+    fputs("Invalid target ID\n", stderr);
+    return -1;
+  }
+
+  rc = inet_pton(AF_INET, argv[2], &target_ip);
+  if (rc != 1) {
     fputs("Invalid target IP\n", stderr);
     return -1;
   }
@@ -136,7 +142,8 @@ main(int argc, char **argv) {
   }
 
   master_addr.sin_family = AF_INET;
-  inet_pton(master_addr.sin_family, MASTER_IP, &master_addr.sin_addr);
+  master_ip = argc == 4 ? argv[3] : MASTER_IP;
+  inet_pton(master_addr.sin_family, master_ip, &master_addr.sin_addr);
   master_addr.sin_port = htons(MASTER_REQUEST_PORT);
 
   rc = connect(
@@ -148,6 +155,7 @@ main(int argc, char **argv) {
     goto close_masterfd;
   }
   
+  write(master_fd, &target_id, sizeof(size_t));
   write(master_fd, &target_ip.s_addr, sizeof(in_addr_t));
   write(master_fd, &listen_addr.sin_port, sizeof(in_port_t));
   rc = read(master_fd, &success, 1);

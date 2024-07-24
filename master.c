@@ -16,7 +16,6 @@ struct target_data {
   struct sockaddr_in saddr;
   int fd;
   int request_fd;
-  struct sockaddr_in request_addr;
   pthread_t thread;
   pthread_cond_t cond;
   pthread_mutex_t mutex;
@@ -94,11 +93,11 @@ static void*
 client_listener_thread_routine(void* data) {
   struct sockaddr_in sock_addr, request_addr;
   struct target_data* td;
-  in_addr_t target_addr;
+  // in_addr_t target_addr;
+  size_t target_id;
   socklen_t request_addr_len;
-  int request_fd, match;
+  int request_fd;
   long rc;
-  size_t i;
   pthread_t alarm;
 
   pthread_sigmask(SIG_BLOCK, &thread_sigmask, NULL);
@@ -152,9 +151,9 @@ client_listener_thread_routine(void* data) {
       continue;
     }
 
-    // Let's try and read 4 bytes from request_fd to get the target
+    // Let's try and read 4 bytes from request_fd to get the target's ID
     alarm = start_timeout_alarm(clients_listener_thread);
-    rc = read(request_fd, &target_addr, sizeof(in_addr_t));
+    rc = read(request_fd, &target_id, sizeof(size_t));
     if (rc < 0) {
       perror("clients listener read()");
       close(request_fd);
@@ -162,24 +161,20 @@ client_listener_thread_routine(void* data) {
     }
     stop_timeout_alarm(alarm);
 
-    // Let's search the args array for this address
-    match = 0;
-    for (i = 0; i < MASTER_TARGETS_MAX; ++i) {
-      td = &targets_data[i];
-      pthread_mutex_lock(&td->mutex);
-      if (td->saddr.sin_addr.s_addr == target_addr) {
+    printf("[*] A client requested the target with ID %zu\n", target_id);
+
+    if (target_id < MASTER_TARGETS_MAX) {
+      td = &targets_data[target_id];
+      if (td->fd > 0) {
+        pthread_mutex_lock(&td->mutex);
         td->request_fd = request_fd;
-        td->request_addr = request_addr;
         pthread_mutex_unlock(&td->mutex);
         pthread_cond_signal(&td->cond);
-        match = 1;
-        break;
-      }
-      pthread_mutex_unlock(&td->mutex);
-    }
-
-    if (!match) {
-      fputs("[!] Client asked for an IP I don't have", stderr);
+      } else
+        goto else_case;
+    } else {
+    else_case:
+      fputs("[!] Client asked for an ID I don't have", stderr);
       close(request_fd);
     }
   }
@@ -237,6 +232,7 @@ wait_and_handle_requests(int target_fd, struct target_data *td) {
   int rc, request_fd, tid;
   pthread_t thd;
   pthread_t alarm;
+  in_addr_t request_ip;
   in_port_t request_port;
   struct sockaddr_in request_addr;
   union client_request request;
@@ -250,9 +246,7 @@ wait_and_handle_requests(int target_fd, struct target_data *td) {
     pthread_mutex_lock(&td->mutex);
     pthread_cond_wait(&td->cond, &td->mutex);
     request_fd = td->request_fd;
-    request_addr = td->request_addr;
     td->request_fd = 0;
-    memset(&td->request_addr, 0, sizeof(struct sockaddr_in));
     pthread_mutex_unlock(&td->mutex);
     if (!running)
       break;
@@ -266,6 +260,12 @@ wait_and_handle_requests(int target_fd, struct target_data *td) {
     printf("[*] (thread %d) Incoming request from %s\n", tid, ip_str);
 
     alarm = start_timeout_alarm(thd);
+    rc = read(request_fd, &request_ip, sizeof(in_addr_t));
+    if (rc < 0) {
+      fprintf(stderr, "[!] (thread %d) Read fail!\n", tid);
+      perror("target listener read()");
+      goto end_connection;
+    }
     rc = read(request_fd, &request_port, sizeof(in_port_t));
     if (rc < 0) {
       fprintf(stderr, "[!] (thread %d) Read fail!\n", tid);
@@ -274,8 +274,11 @@ wait_and_handle_requests(int target_fd, struct target_data *td) {
     }
     stop_timeout_alarm(alarm);
 
-    request.client_ip = request_addr.sin_addr.s_addr;
+    request.client_ip = request_ip;
     request.client_port = request_port;
+
+    inet_ntop(AF_INET, &request_ip, ip_str, sizeof(ip_str));
+    printf("[*] Asking client %zu to connect to %s:%d\n", td - targets_data, ip_str, ntohs(request_port));
 
     alarm = start_timeout_alarm(thd);
     write(target_fd, &request, sizeof(union client_request));
@@ -437,17 +440,18 @@ main(void) {
       NULL,
       &target_listener_thread_routine,
       (void*)td);
-    pthread_mutex_unlock(&td->mutex);
     
-    // We can no longer use this slot
-    pool_index = (pool_index+1) % MASTER_TARGETS_MAX;
-
     inet_ntop(
       target_addr.sin_family,
       &target_addr.sin_addr,
       ip_str,
       sizeof(ip_str));
-    printf("[*] Accepted connection from target with IP %s\n", ip_str);
+    printf("[*] Accepted connection from target with IP %s (target ID is %lu)\n", ip_str, pool_index);
+
+    // We can no longer use this slot
+    pool_index = (pool_index+1) % MASTER_TARGETS_MAX;
+
+    pthread_mutex_unlock(&td->mutex);
   }
 
   if (clients_listener_fd > 0) {
