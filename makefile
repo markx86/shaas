@@ -1,9 +1,12 @@
 TARGET_CC 		?= gcc
+TARGET_STRIP	?= strip
 TARGET_ARCH		?= x86_64
 TARGET_SHELL	?= /bin/sh
 TARGET_ARGV		?= "-i"
 TARGET_ENVP		?= "TERM=linux"
 TARGET_ARTIFACT	?= shaas.$(TARGET_ARCH).payload
+TARGET_OPTLEVEL ?= z
+TARGET_CCFLAGS  ?=
 
 MASTER_CC			?= gcc
 MASTER_ARCH			?= x86_64

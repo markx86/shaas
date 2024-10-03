@@ -79,6 +79,7 @@ stop_timeout_alarm(pthread_t alarm) {
 static int
 send_close_magic(int target_fd, char* success) {
   union client_request request;
+  const unsigned char close_magic[] = CLOSE_MAGIC;
   memcpy(request.bytes, close_magic, sizeof(close_magic));
   write(target_fd, &request, sizeof(union client_request));
   if (success != NULL)  
@@ -210,7 +211,7 @@ target_listener_thread_routine(void* data) {
 
   rc = wait_and_handle_requests(target_fd, td);
   if (rc < 0) {
-    fputs("target listener wait_and_handle_requests(): error", stderr);
+    fprintf(stderr, "[!] (thread %d) target listener wait_and_handle_requests(): error\n", tid);
     // TODO: error handling?
   }
 

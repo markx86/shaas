@@ -10,7 +10,7 @@ fi
 file=$1
 tmp_file="/tmp/$file.tmp"
 
-strip -s -R '!.load' "$file" -o "$tmp_file"
+$TARGET_STRIP -s -R '!.load' "$file" -o "$tmp_file"
 shstrtab_off=$(readelf -S "$tmp_file" | grep "\.shstrtab" | tr -s ' ' | cut -d ' ' -f7)
 shstrtab_off=$(printf "%u" 0x$shstrtab_off)
 

@@ -35,7 +35,6 @@ syscall2(long n, long a, long b) {
   asm("movq %rdi, %rax;"
       "movq %rsi, %rdi;"
       "movq %rdx, %rsi;"
-      "movq %rcx, %rdx;"
       "syscall;"
       "ret");
 }

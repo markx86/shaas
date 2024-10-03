@@ -1,8 +1,7 @@
 #ifndef __REQUEST_H__
 #define __REQUEST_H__
 
-const unsigned char close_magic[] =
-    {0xde, 0xad, 0xbe, 0xef, 0xba, 0xbe, 0x00, 0x00};
+#define CLOSE_MAGIC {0xde, 0xad, 0xbe, 0xef}
 
 union client_request {
   __attribute__((packed)) struct {

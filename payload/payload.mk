@@ -5,9 +5,10 @@ target_ccflags =				\
 	-Wl,-T./payload/payload.ld	\
 	-Wl,--build-id=none			\
 	-I./include					\
-	-Os							\
+	-O$(TARGET_OPTLEVEL)		\
+	$(TARGET_CCFLAGS)			\
 	$(defines)
 
 $(TARGET_ARTIFACT): ./payload/payload.c
 	$(TARGET_CC) $(target_ccflags) -o $@ $^
-	./payload/strip.sh $@
+	env TARGET_STRIP=$(TARGET_STRIP) ./payload/strip.sh $@

@@ -1,10 +1,22 @@
 #ifndef __INET_H__
 #define __INET_H__
 
+#ifndef SOCK_STREAM
 #define SOCK_STREAM 1
+#endif
+
+#ifndef SOL_SCOKET
 #define SOL_SOCKET 1
+#endif
+
+#ifndef IPPROTO_TCP
 #define IPPROTO_TCP 6
+#endif
+
+#ifndef PF_INET
 #define PF_INET 2
+#endif
+
 #define AF_INET PF_INET
 
 typedef unsigned short sa_family_t;
