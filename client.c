@@ -7,11 +7,11 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <unistd.h>
-#include <sched.h>
+#include <poll.h>
+#include <errno.h>
 #include <shaas/config.h>
 
 static int running;
-static char transfer_buf[4096];
 
 static void
 sigint_handler(int signo) {
@@ -19,8 +19,9 @@ sigint_handler(int signo) {
 }
 
 static int
-transfer_data(int from, int to, int skip) {
-  int n, r, rc;
+transfer_data(int from, int to) {
+  int n, chunk_size, rc;
+  char buf[4096];
 
   rc = ioctl(from, FIONREAD, &n);
   if (rc < 0) {
@@ -28,28 +29,16 @@ transfer_data(int from, int to, int skip) {
     goto fail;
   }
 
-  if (!n || n < skip)
-    return 0;
-
-  r = 0;
-  while (r < n) {
-    rc = read(from, transfer_buf, sizeof(transfer_buf));
-    if (rc < 0) {
-      perror("read");
+  while (n > 0) {
+    chunk_size = n > sizeof(buf) ? sizeof(buf) : n;
+    rc = chunk_size = read(from, buf, chunk_size);
+    if (rc < 0)
       goto fail;
-    }
-    r += rc;
-    if (skip >= rc) {
-      skip -= rc;
-      break;
-    }
-    rc = write(to, transfer_buf, rc);
-    if (rc < 0) {
-      perror("write");
+    rc = write(to, buf, rc);
+    if (rc < 0)
       goto fail;
-    }
+    n -= chunk_size;
   }
-  rc = r;
 
 fail:
   return rc;
@@ -58,11 +47,12 @@ fail:
 int
 main(int argc, char **argv) {
   char success, *invalid_ptr, *master_ip;
-  int rc, skip, listen_fd, shell_fd, master_fd;
+  int rc, listen_fd, shell_fd, master_fd;
   size_t target_id;
   socklen_t target_addr_len;
   struct sockaddr_in listen_addr, master_addr, target_addr;
   struct sigaction sig_alrm, sig_int;
+  struct pollfd pfds[2];
   char ip_str[INET_ADDRSTRLEN];
   struct in_addr target_ip;
 
@@ -189,20 +179,24 @@ main(int argc, char **argv) {
   close(listen_fd);
 
   running = 1;
-  skip = 0;
+  pfds[0].fd = 0;
+  pfds[0].events = POLLIN;
+  pfds[1].fd = shell_fd;
+  pfds[1].events = POLLIN;
   while (running) {
-    rc = transfer_data(0, shell_fd, 0);
-    if (rc < 0)
+    rc = poll(pfds, 2, 1000);
+    if (rc == 0)
+      continue;
+    else if (rc < 0) {
+      if (errno == EINTR)
+        continue;
+      perror("poll");
       break;
-    skip += rc;
-    rc = transfer_data(shell_fd, 1, skip);
-    if (rc < 0)
-      break;
-    if (skip > 0)
-      skip -= rc;
-    if (skip < 0)
-      skip = 0;
-    sched_yield();
+    }
+    if (pfds[0].revents & POLLIN)
+      transfer_data(0, shell_fd);
+    if (pfds[1].revents & POLLIN)
+      transfer_data(shell_fd, 1);
   }
 
   close(shell_fd);
