@@ -18,7 +18,7 @@
 #define SYS_EXECVE 4011
 #define SYS_EXIT 4001
 
-static long
+static __attribute__((optimize("O0"))) long
 syscall0(long n) {
   long r;
   asm("move $v0, $a0;"
@@ -28,7 +28,7 @@ syscall0(long n) {
   return r;
 }
 
-static long
+static __attribute__((optimize("O0"))) long
 syscall1(long n, long a) {
   long r;
   asm("move $v0, $a0;"
@@ -39,7 +39,7 @@ syscall1(long n, long a) {
   return r;
 }
 
-static long
+static __attribute__((optimize("O0"))) long
 syscall2(long n, long a, long b) {
   long r;
   asm("move $v0, $a0;"
@@ -51,7 +51,7 @@ syscall2(long n, long a, long b) {
   return r;
 }
 
-static long
+static __attribute__((optimize("O0"))) long
 syscall3(long n, long a, long b, long c) {
   long r;
   asm("move $v0, $a0;"
