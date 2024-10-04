@@ -1,10 +1,10 @@
 #ifndef __PLATFORM_H__
 #define __PLATFORM_H__
 
-static long syscall0(long);
-static long syscall1(long, long);
-static long syscall2(long, long, long);
-static long syscall3(long, long, long, long);
+extern long syscall0(long);
+extern long syscall1(long, long);
+extern long syscall2(long, long, long);
+extern long syscall3(long, long, long, long);
 
 #if defined(TARGET_ARCH_x86_64)
 #include "platform/platform-x86_64.h"

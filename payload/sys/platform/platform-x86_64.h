@@ -15,14 +15,14 @@
 #define SYS_EXECVE 59
 #define SYS_EXIT 60
 
-static __attribute__((naked)) long
+__attribute__((naked)) long
 syscall0(long n) {
   asm("movq %rdi, %rax;"
       "syscall;"
       "ret");
 }
 
-static __attribute__((naked)) long
+__attribute__((naked)) long
 syscall1(long n, long a) {
   asm("movq %rdi, %rax;"
       "movq %rsi, %rdi;"
@@ -30,7 +30,7 @@ syscall1(long n, long a) {
       "ret");
 }
 
-static __attribute__((naked)) long
+__attribute__((naked)) long
 syscall2(long n, long a, long b) {
   asm("movq %rdi, %rax;"
       "movq %rsi, %rdi;"
@@ -39,7 +39,7 @@ syscall2(long n, long a, long b) {
       "ret");
 }
 
-static __attribute__((naked)) long
+__attribute__((naked)) long
 syscall3(long n, long a, long b, long c) {
   asm("movq %rdi, %rax;"
       "movq %rsi, %rdi;"
