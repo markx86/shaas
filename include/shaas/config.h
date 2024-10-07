@@ -26,7 +26,11 @@
 #endif
 
 #ifndef MASTER_TARGETS_MAX
-#define MASTER_TARGETS_MAX 128
+#define MASTER_TARGETS_MAX 32
+#endif
+
+#ifndef MASTER_CLIENTS_MAX
+#define MASTER_CLIENTS_MAX 32
 #endif
 
 #ifndef CLIENT_PORT
